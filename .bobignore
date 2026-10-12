@@ -4,3 +4,4 @@ __pycache__/
 .venv/
 *.pyc
 docs/bob-workflow/*.jsonl
+.venv/

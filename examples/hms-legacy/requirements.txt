@@ -1,0 +1,8 @@
+# S0 baseline — versions as found in a 2023 Flask-SQLAlchemy 2.x project (db.engine.execute era)
+Flask==2.2.5
+Werkzeug==2.2.3
+Flask-SQLAlchemy==2.5.1
+SQLAlchemy==1.4.46
+Flask-Login==0.6.2
+Flask-Mail==0.9.1
+gunicorn==21.2.0

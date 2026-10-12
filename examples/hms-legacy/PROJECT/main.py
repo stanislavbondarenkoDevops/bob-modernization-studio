@@ -1,4 +1,5 @@
 from ast import Param
+import os
 from flask import Flask,render_template,request,session,redirect,url_for,flash
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import UserMixin
@@ -38,7 +39,8 @@ def load_user(user_id):
 
 
 
-app.config['SQLALCHEMY_DATABASE_URI']='mysql://root:@localhost/hmdbms'
+# S0 (baseline): DB URI from env so the app can run on SQLite for tests; default unchanged
+app.config['SQLALCHEMY_DATABASE_URI']=os.environ.get('DATABASE_URL','mysql://root:@localhost/hmdbms')
 db=SQLAlchemy(app)
 
 
@@ -270,5 +272,7 @@ def search():
 
 
 
-app.run(debug=True)    
+# S0 (baseline): guard so importing the module (tests, gunicorn) does not start the dev server
+if __name__ == '__main__':
+    app.run(debug=True)
 

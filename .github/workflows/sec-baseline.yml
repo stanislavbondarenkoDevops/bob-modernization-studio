@@ -1,0 +1,114 @@
+# SEC-BASELINE gate automation — machine check behind the security-director verdict.
+# Each job is one gate. `continue-on-error` is only allowed while ADR-001 says the step
+# is still legacy (see docs/gates-ledger.md) and is removed when the step lands.
+name: sec-baseline
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  APP_DIR: examples/hms-legacy
+  GITLEAKS_VERSION: "8.24.2"
+  TRIVY_IMAGE: "aquasec/trivy:0.58.1"
+  IMAGE: "hms:${{ github.sha }}"
+
+jobs:
+  # 1. SECRETS — whole git history
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Gitleaks
+        run: |
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar xz gitleaks
+          ./gitleaks git . --redact --no-banner
+
+  # 2. SAST — soft until S1 (8 f-string SQL + hardcoded creds are the legacy baseline)
+  sast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install bandit semgrep
+      - name: Bandit (medium+)
+        continue-on-error: true   # GATE-LEDGER: hard after v1-secure
+        run: bandit -r $APP_DIR/PROJECT -ll
+      - name: Semgrep (OWASP Top 10)
+        continue-on-error: true   # GATE-LEDGER: hard after v1-secure
+        run: semgrep scan --config p/python --config p/owasp-top-ten --error --metrics off $APP_DIR/PROJECT
+
+  # 3. SCA — soft until S2 (11 CVEs in as-found pins)
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install pip-audit
+      - name: pip-audit
+        continue-on-error: true   # GATE-LEDGER: hard after v2-platform
+        run: pip-audit -r $APP_DIR/requirements.txt --strict
+
+  # 4. TESTS — characterization suite, always hard
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: pip install -r $APP_DIR/requirements-dev.txt
+      - run: cd $APP_DIR && pytest -v
+
+  # 5. CONTAINER — build → image scan → SBOM → DAST
+  container:
+    needs: [secrets, sast, sca, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: docker build -t "$IMAGE" $APP_DIR
+      - name: Trivy image scan (HIGH/CRITICAL, fixable)
+        continue-on-error: true   # GATE-LEDGER: hard after v2-platform
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY_IMAGE" \
+            image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE"
+      - name: SBOM (CycloneDX)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD:/out" "$TRIVY_IMAGE" \
+            image --format cyclonedx --output /out/sbom.json "$IMAGE"
+      - uses: actions/upload-artifact@v4
+        with: { name: sbom, path: sbom.json }
+      - name: Run app
+        run: |
+          docker run -d --name app -p 8000:8000 "$IMAGE"
+          for i in $(seq 1 30); do curl -sf localhost:8000/ >/dev/null && break; sleep 1; done
+          curl -sf localhost:8000/ >/dev/null
+      - name: DAST — OWASP ZAP baseline
+        run: |
+          docker run --rm --network host -v "$PWD:/zap/wrk" ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://localhost:8000 -I -r zap-report.html
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: zap-report, path: zap-report.html }
+
+  # 6. VERDICT — collect gate results into docs/verdicts format (Bob Shell non-interactive
+  #    step is added here once headless auth is confirmed; until then this is a plain script)
+  verdict:
+    needs: [container]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Emit SEC-BASELINE CI summary
+        run: |
+          {
+            echo "## [SEC-BASELINE] CI run ${{ github.sha }}"
+            echo "secrets=${{ needs.container.result }} (chain) sast/sca=soft (see gates-ledger)"
+          } >> "$GITHUB_STEP_SUMMARY"
